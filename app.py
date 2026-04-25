@@ -957,19 +957,29 @@ def build_app() -> gr.Blocks:
             api_name=False,
         )
 
-        # Examples panel
+        # Examples panel — vcf_file excluded: passing None to gr.File in Examples
+        # causes Gradio to try hashing the /app directory on HF Spaces (IsADirectoryError).
+        # We wire examples only to the text-based inputs; vcf_file stays empty.
+        def _run_text_example(ex_vcf_text: str, ex_drug: str, ex_pid: str, ex_hint: str):
+            return run_analysis(None, ex_vcf_text, ex_drug, ex_pid, ex_hint)
+
         gr.Examples(
             examples=[
-                [None, "", "MORPHINE",    "PAT-001", "Ultrarapid"],
-                [None, "", "MORPHINE",    "PAT-002", "Normal"],
-                [None, "", "CODEINE",     "PAT-003", "Ultrarapid"],
-                [None, "", "TRAMADOL",    "PAT-004", "Poor"],
-                [None, "", "WARFARIN",    "PAT-005", "Poor"],
-                [None, "", "CLOPIDOGREL", "PAT-006", "Poor"],
-                [None, "", "AZATHIOPRINE","PAT-007", "Poor"],
+                ["", "MORPHINE",     "PAT-001", "Ultrarapid"],
+                ["", "MORPHINE",     "PAT-002", "Normal"],
+                ["", "CODEINE",      "PAT-003", "Ultrarapid"],
+                ["", "TRAMADOL",     "PAT-004", "Poor"],
+                ["", "WARFARIN",     "PAT-005", "Poor"],
+                ["", "CLOPIDOGREL",  "PAT-006", "Poor"],
+                ["", "AZATHIOPRINE", "PAT-007", "Poor"],
+                ["", "FLUOROURACIL", "PAT-008", "Poor"],
+                ["", "SIMVASTATIN",  "PAT-009", "Intermediate"],
             ],
-            inputs=[vcf_file, vcf_text, drug, patient_id, metabolizer_hint],
-            label="⚡ Quick Demo Examples (click any row)",
+            inputs=[vcf_text, drug, patient_id, metabolizer_hint],
+            outputs=[result_html, output_json],
+            fn=_run_text_example,
+            cache_examples=False,
+            label="⚡ Quick Demo Examples — click any row to run instantly",
         )
 
         gr.HTML(
