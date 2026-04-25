@@ -880,6 +880,33 @@ def gradio_run_text(vcf_text: str, drug: str, pid: str, hint: str) -> Tuple[str,
     return gradio_run(None, vcf_text, drug, pid, hint)
 
 
+# Module-level handlers (must NOT be inner functions — Gradio route serialisation)
+def _handler_btn(vcf_f, vcf_t, d, pid, hint):
+    """Full run: VCF file + text → HTML card, JSON text, JSON file path."""
+    html, path = gradio_run(vcf_f, vcf_t, d, pid, hint)
+    txt = ""
+    if path:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                txt = fh.read()
+        except Exception:
+            pass
+    return html, txt, path
+
+
+def _handler_example(vcf_t, d, pid, hint):
+    """Text-only run for Examples panel → HTML card, JSON text (no gr.File)."""
+    html, path = gradio_run_text(vcf_t, d, pid, hint)
+    txt = ""
+    if path:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                txt = fh.read()
+        except Exception:
+            pass
+    return html, txt
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CSS  (Apollo / Medical Blue)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1044,46 +1071,28 @@ def build_app() -> gr.Blocks:
                 gr.HTML('<p class="section-lbl">📊 Risk Assessment Result</p>')
                 result_html = gr.HTML(value=EMPTY)
 
-                with gr.Row():
-                    with gr.Column(scale=3):
-                        gr.HTML('<p class="section-lbl" style="margin-top:16px">🗂️ Structured JSON (RIFT Schema)</p>')
-                        output_json = gr.Textbox(
-                            label="",
-                            lines=16,
-                            elem_id="json-out",
-                            show_copy_button=True,
-                        )
-                    with gr.Column(scale=1, min_width=160):
-                        gr.HTML('<p class="section-lbl" style="margin-top:16px">📥 Download</p>')
-                        download_file = gr.File(
-                            label="Clinical Report (JSON)",
-                        )
+                gr.HTML('<p class="section-lbl" style="margin-top:16px">🗂️ Structured JSON (RIFT Schema)</p>')
+                output_json = gr.Textbox(
+                    label="",
+                    lines=16,
+                    elem_id="json-out",
+                )
+                gr.HTML('<p class="section-lbl" style="margin-top:10px">📥 Download Clinical Report</p>')
+                download_file = gr.File(
+                    label="pharmaguard_result.json",
+                )
 
-        # ── Wire main button ─────────────────────────────────────────────────
-        def _full_run(vcf_f, vcf_t, d, pid, hint):
-            html, path = gradio_run(vcf_f, vcf_t, d, pid, hint)
-            try:
-                txt = open(path, encoding="utf-8").read() if path else ""
-            except Exception:
-                txt = ""
-            return html, txt, path
-
+        # ── Wire main Analyze button ─────────────────────────────────────────
         analyze_btn.click(
-            fn=_full_run,
+            fn=_handler_btn,
             inputs=[vcf_file, vcf_text, drug, patient_id, metabolizer_hint],
             outputs=[result_html, output_json, download_file],
             api_name=False,
         )
 
-        # ── Examples (NO vcf_file to avoid HF IsADirectoryError) ────────────
-        def _example_run(vcf_t, d, pid, hint):
-            html, path = gradio_run_text(vcf_t, d, pid, hint)
-            try:
-                txt = open(path, encoding="utf-8").read() if path else ""
-            except Exception:
-                txt = ""
-            return html, txt, path
-
+        # ── Examples panel — vcf_file excluded; gr.File excluded from outputs
+        # Gradio crashes if gr.File is in gr.Examples outputs on HF Spaces.
+        # The download button still works via the main Analyze button.
         gr.Examples(
             examples=[
                 ["", "MORPHINE",      "PAT-001", "Ultrarapid"],
@@ -1099,8 +1108,8 @@ def build_app() -> gr.Blocks:
                 ["", "TRAMADOL",      "PAT-011", "Ultrarapid"],
             ],
             inputs=[vcf_text, drug, patient_id, metabolizer_hint],
-            outputs=[result_html, output_json, download_file],
-            fn=_example_run,
+            outputs=[result_html, output_json],
+            fn=_handler_example,
             cache_examples=False,
             label="⚡ Quick Demo Examples — click any row",
         )
