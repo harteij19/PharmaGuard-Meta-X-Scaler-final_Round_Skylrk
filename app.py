@@ -489,12 +489,13 @@ Upload a VCF file (or paste VCF text), pick a drug, and generate structured risk
         analyze_btn = gr.Button("Analyze")
 
         summary_md = gr.Markdown()
-        output_json = gr.Code(label="Structured Result JSON", language="json")
+        output_json = gr.Textbox(label="Structured Result JSON", lines=18)
 
         analyze_btn.click(
             fn=run_analysis,
             inputs=[vcf_file, vcf_text, drug, patient_id],
             outputs=[summary_md, output_json],
+            api_name=False,
         )
 
     return demo
@@ -502,4 +503,4 @@ Upload a VCF file (or paste VCF text), pick a drug, and generate structured risk
 
 if __name__ == "__main__":
     app = build_app()
-    app.launch(server_name="0.0.0.0", server_port=7860)
+    app.launch()
