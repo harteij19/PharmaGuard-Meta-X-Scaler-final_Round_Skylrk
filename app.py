@@ -1,56 +1,65 @@
 """
-PharmaGuard AI — Hugging Face Spaces entrypoint.
-Apollo-style UI + rule-based pharmacogenomic risk engine.
+PharmaGuard AI — RIFT 2026 HealthTech Hackathon
+Pharmacogenomic Risk Prediction System
 """
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import gradio as gr
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DATA TABLES
+# CONSTANTS & KNOWLEDGE BASE
 # ─────────────────────────────────────────────────────────────────────────────
 
-DRUG_GENE_MAP: Dict[str, str] = {
-    "MORPHINE":     "CYP2D6",
-    "CODEINE":      "CYP2D6",
-    "TRAMADOL":     "CYP2D6",
-    "WARFARIN":     "CYP2C9",
-    "CLOPIDOGREL":  "CYP2C19",
-    "SIMVASTATIN":  "SLCO1B1",
-    "AZATHIOPRINE": "TPMT",
-    "FLUOROURACIL": "DPYD",
+DRUG_GENE_MAP: Dict[str, List[str]] = {
+    "MORPHINE":      ["CYP2D6"],
+    "CODEINE":       ["CYP2D6"],
+    "TRAMADOL":      ["CYP2D6"],
+    "WARFARIN":      ["CYP2C9", "VKORC1"],
+    "CLOPIDOGREL":   ["CYP2C19"],
+    "SIMVASTATIN":   ["SLCO1B1"],
+    "AZATHIOPRINE":  ["TPMT"],
+    "FLUOROURACIL":  ["DPYD"],
 }
 
+# rsID → star-allele for each gene
 RS_TO_STAR: Dict[str, Dict[str, str]] = {
     "CYP2D6": {
-        "rs3892097":  "*4",   # loss-of-function
-        "rs35742686": "*3",   # loss-of-function
-        "rs5030655":  "*6",   # loss-of-function
-        "rs16947":    "*2",   # normal/increased
-        "rs1135840":  "*10",  # decreased
-        "rs28371725": "*17",  # ultrarapid marker
+        "rs3892097":  "*4",   "rs35742686": "*3",
+        "rs5030655":  "*6",   "rs16947":    "*2",
+        "rs1135840":  "*10",  "rs28371725": "*17",
+        "rs1058164":  "*29",
     },
     "CYP2C19": {
-        "rs4244285":  "*2",
-        "rs4986893":  "*3",
+        "rs4244285":  "*2",   "rs4986893":  "*3",
         "rs12248560": "*17",
     },
     "CYP2C9": {
-        "rs1799853": "*2",
-        "rs1057910": "*3",
+        "rs1799853":  "*2",   "rs1057910":  "*3",
     },
-    "SLCO1B1": {"rs4149056": "*5"},
-    "TPMT":    {"rs1142345": "*3A", "rs1800460": "*3C", "rs1800462": "*2"},
-    "DPYD":    {"rs3918290": "*2A", "rs55886062": "*13"},
+    "SLCO1B1": {
+        "rs4149056":  "*5",
+    },
+    "TPMT": {
+        "rs1142345":  "*3A",  "rs1800460":  "*3C",
+        "rs1800462":  "*2",
+    },
+    "DPYD": {
+        "rs3918290":  "*2A",  "rs55886062": "*13",
+    },
+    "VKORC1": {
+        "rs9923231":  "A",    # sensitive / low-dose
+        "rs9934438":  "A",
+    },
 }
 
-# (phenotype_name, activity_bucket, confidence)
+# diplotype → (phenotype_label, activity_bucket, confidence)
 PHENOTYPE_MAP: Dict[str, Dict[str, Tuple[str, str, float]]] = {
     "CYP2D6": {
         "*1/*1":   ("Normal Metabolizer",      "Normal",      0.95),
@@ -58,9 +67,9 @@ PHENOTYPE_MAP: Dict[str, Dict[str, Tuple[str, str, float]]] = {
         "*2/*2":   ("Ultrarapid Metabolizer",  "Ultrarapid",  0.91),
         "*1/*17":  ("Ultrarapid Metabolizer",  "Ultrarapid",  0.89),
         "*17/*17": ("Ultrarapid Metabolizer",  "Ultrarapid",  0.92),
-        "*1/*4":   ("Intermediate Metabolizer","Intermediate", 0.92),
-        "*1/*3":   ("Intermediate Metabolizer","Intermediate", 0.91),
-        "*1/*10":  ("Intermediate Metabolizer","Intermediate", 0.90),
+        "*1/*4":   ("Intermediate Metabolizer","Intermediate",0.92),
+        "*1/*3":   ("Intermediate Metabolizer","Intermediate",0.91),
+        "*1/*10":  ("Intermediate Metabolizer","Intermediate",0.90),
         "*4/*4":   ("Poor Metabolizer",        "Poor",        0.96),
         "*3/*3":   ("Poor Metabolizer",        "Poor",        0.94),
         "*3/*4":   ("Poor Metabolizer",        "Poor",        0.93),
@@ -75,17 +84,17 @@ PHENOTYPE_MAP: Dict[str, Dict[str, Tuple[str, str, float]]] = {
         "*17/*17": ("Rapid Metabolizer",       "Rapid",       0.91),
     },
     "CYP2C9": {
-        "*1/*1": ("Normal Metabolizer",      "Normal",      0.95),
-        "*1/*2": ("Intermediate Metabolizer","Intermediate",0.92),
-        "*1/*3": ("Intermediate Metabolizer","Intermediate",0.93),
-        "*2/*2": ("Poor Metabolizer",        "Poor",        0.91),
-        "*2/*3": ("Poor Metabolizer",        "Poor",        0.90),
-        "*3/*3": ("Poor Metabolizer",        "Poor",        0.94),
+        "*1/*1":   ("Normal Metabolizer",      "Normal",      0.95),
+        "*1/*2":   ("Intermediate Metabolizer","Intermediate",0.92),
+        "*1/*3":   ("Intermediate Metabolizer","Intermediate",0.93),
+        "*2/*2":   ("Poor Metabolizer",        "Poor",        0.91),
+        "*2/*3":   ("Poor Metabolizer",        "Poor",        0.90),
+        "*3/*3":   ("Poor Metabolizer",        "Poor",        0.94),
     },
     "SLCO1B1": {
-        "*1/*1": ("Normal Function",    "Normal",      0.96),
-        "*1/*5": ("Decreased Function", "Intermediate",0.91),
-        "*5/*5": ("Poor Function",      "Poor",        0.93),
+        "*1/*1":   ("Normal Function",         "Normal",      0.96),
+        "*1/*5":   ("Decreased Function",      "Intermediate",0.91),
+        "*5/*5":   ("Poor Function",           "Poor",        0.93),
     },
     "TPMT": {
         "*1/*1":   ("Normal Metabolizer",      "Normal",      0.96),
@@ -99,237 +108,294 @@ PHENOTYPE_MAP: Dict[str, Dict[str, Tuple[str, str, float]]] = {
         "*2A/*2A": ("Poor Metabolizer",        "Poor",        0.94),
         "*1/*13":  ("Intermediate Metabolizer","Intermediate",0.89),
     },
+    "VKORC1": {
+        "A/A":   ("Warfarin-Sensitive",       "Sensitive",   0.93),
+        "A/G":   ("Warfarin-Intermediate",    "Intermediate",0.88),
+        "G/G":   ("Warfarin-Normal",          "Normal",      0.91),
+    },
 }
 
-# severity: low | moderate | high | critical
+# ── Risk rules keyed by drug → activity_bucket ──────────────────────────────
+# risk_label MUST be one of: Safe | Adjust Dosage | Toxic | Ineffective | Unknown
 RISK_RULES: Dict[str, Dict[str, Dict[str, Any]]] = {
     "MORPHINE": {
         "Ultrarapid": {
-            "risk_label": "RISKY",
-            "severity": "critical",
+            "risk_label": "Toxic",
+            "severity": "high",
             "confidence": 0.93,
-            "dosage": "Avoid — use non-opioid alternative",
-            "guidance": (
-                "Ultrarapid CYP2D6 metabolizers convert morphine to active metabolites "
-                "at an accelerated rate, risking respiratory depression and toxicity even "
-                "at standard doses."
-            ),
+            "dosage": "Avoid or reduce dose significantly",
+            "action": "Use non-opioid alternative",
+            "monitoring": "Monitor for respiratory depression and toxicity",
+            "summary": "Ultrarapid CYP2D6 metabolism converts morphine to active metabolites at an accelerated rate, causing dangerous plasma accumulation and toxicity risk.",
         },
         "Poor": {
-            "risk_label": "MODERATE",
+            "risk_label": "Adjust Dosage",
             "severity": "moderate",
             "confidence": 0.88,
-            "dosage": "Reduce dose by 25–50 % · monitor closely",
-            "guidance": (
-                "Poor metabolizers accumulate morphine with reduced clearance. "
-                "Lower doses and frequent pain assessments are recommended."
-            ),
+            "dosage": "Reduce dose by 25–50%",
+            "action": "Close pain response monitoring",
+            "monitoring": "Monitor analgesic effect and sedation level",
+            "summary": "Poor CYP2D6 metabolizers show reduced morphine clearance, requiring dose reduction to avoid accumulation.",
         },
         "Intermediate": {
-            "risk_label": "MODERATE",
+            "risk_label": "Adjust Dosage",
             "severity": "moderate",
-            "confidence": 0.85,
-            "dosage": "Start at low end of standard range · titrate slowly",
-            "guidance": "Intermediate CYP2D6 activity may reduce analgesic effect; monitor response.",
+            "confidence": 0.84,
+            "dosage": "Start at lower end of dosing range",
+            "action": "Titrate slowly based on response",
+            "monitoring": "Monitor pain control and sedation",
+            "summary": "Intermediate CYP2D6 activity may slightly reduce analgesic efficacy; careful titration recommended.",
         },
         "Normal": {
-            "risk_label": "SAFE",
+            "risk_label": "Safe",
             "severity": "low",
             "confidence": 0.93,
             "dosage": "Standard dose",
-            "guidance": "Normal CYP2D6 activity. Standard morphine dosing is appropriate.",
+            "action": "Proceed with standard regimen",
+            "monitoring": "Routine clinical monitoring",
+            "summary": "Normal CYP2D6 activity. Standard morphine dosing is appropriate.",
         },
     },
     "CODEINE": {
         "Ultrarapid": {
-            "risk_label": "RISKY",
-            "severity": "critical",
+            "risk_label": "Toxic",
+            "severity": "high",
             "confidence": 0.95,
-            "dosage": "Avoid — use non-opioid alternative",
-            "guidance": (
-                "Ultrarapid CYP2D6 activity converts codeine to morphine rapidly, causing "
-                "life-threatening opioid toxicity. Contraindicated per CPIC guidelines."
-            ),
+            "dosage": "Contraindicated — avoid",
+            "action": "Switch to a non-CYP2D6-dependent analgesic",
+            "monitoring": "Immediate toxicity monitoring if administered",
+            "summary": "Ultrarapid CYP2D6 activity converts codeine to morphine at dangerous speed — life-threatening respiratory depression risk per CPIC guidelines.",
         },
         "Poor": {
-            "risk_label": "MODERATE",
+            "risk_label": "Ineffective",
             "severity": "moderate",
             "confidence": 0.93,
-            "dosage": "Avoid codeine · consider alternative analgesic",
-            "guidance": "Poor metabolizers receive no analgesic benefit from codeine (inactive prodrug).",
+            "dosage": "Avoid — no analgesic benefit",
+            "action": "Use alternative analgesic (e.g. ibuprofen, tramadol cautiously)",
+            "monitoring": "Monitor for lack of pain relief",
+            "summary": "Poor CYP2D6 metabolizers cannot convert codeine (prodrug) to morphine — no therapeutic effect expected.",
         },
         "Intermediate": {
-            "risk_label": "MODERATE",
+            "risk_label": "Adjust Dosage",
             "severity": "moderate",
-            "confidence": 0.88,
-            "dosage": "Use lowest effective dose · monitor",
-            "guidance": "Reduced conversion to morphine; pain relief may be suboptimal.",
+            "confidence": 0.87,
+            "dosage": "Use lowest effective dose",
+            "action": "Monitor pain relief; consider alternative",
+            "monitoring": "Assess analgesic efficacy at 30–60 minutes",
+            "summary": "Reduced CYP2D6 activity lowers codeine-to-morphine conversion; pain relief may be suboptimal.",
         },
         "Normal": {
-            "risk_label": "SAFE",
+            "risk_label": "Safe",
             "severity": "low",
-            "confidence": 0.93,
+            "confidence": 0.92,
             "dosage": "Standard dose",
-            "guidance": "Standard codeine dosing is appropriate with routine monitoring.",
+            "action": "Proceed with standard regimen",
+            "monitoring": "Routine clinical monitoring",
+            "summary": "Normal CYP2D6 activity. Standard codeine dosing is appropriate.",
         },
     },
     "TRAMADOL": {
         "Ultrarapid": {
-            "risk_label": "RISKY",
-            "severity": "critical",
+            "risk_label": "Toxic",
+            "severity": "high",
             "confidence": 0.91,
-            "dosage": "Avoid — serotonin syndrome & overdose risk",
-            "guidance": (
-                "Ultrarapid metabolizers over-produce the active O-desmethyltramadol metabolite, "
-                "increasing seizure and serotonin toxicity risk."
-            ),
+            "dosage": "Avoid",
+            "action": "Switch to non-opioid or CYP2D6-independent analgesic",
+            "monitoring": "Monitor for serotonin syndrome and opioid toxicity",
+            "summary": "Ultrarapid metabolizers produce excess O-desmethyltramadol, raising seizure and serotonin toxicity risk.",
         },
         "Poor": {
-            "risk_label": "MODERATE",
+            "risk_label": "Ineffective",
             "severity": "moderate",
             "confidence": 0.87,
-            "dosage": "Reduce dose · consider alternative",
-            "guidance": "Poor CYP2D6 activity reduces tramadol activation, limiting analgesic effect.",
+            "dosage": "Reduced analgesic effect — consider alternative",
+            "action": "Use alternative analgesic",
+            "monitoring": "Monitor pain response",
+            "summary": "Poor CYP2D6 activity reduces tramadol activation, limiting analgesic effect.",
         },
         "Intermediate": {
-            "risk_label": "MODERATE",
-            "severity": "moderate",
-            "confidence": 0.85,
-            "dosage": "Standard dose — monitor for efficacy",
-            "guidance": "Intermediate metabolism may slightly reduce analgesic efficacy.",
+            "risk_label": "Adjust Dosage",
+            "severity": "low",
+            "confidence": 0.84,
+            "dosage": "Standard dose with monitoring",
+            "action": "Titrate based on efficacy",
+            "monitoring": "Assess pain control",
+            "summary": "Intermediate metabolism may slightly reduce analgesic efficacy.",
         },
         "Normal": {
-            "risk_label": "SAFE",
+            "risk_label": "Safe",
             "severity": "low",
             "confidence": 0.92,
             "dosage": "Standard dose",
-            "guidance": "Normal CYP2D6 activity. Standard tramadol dosing is appropriate.",
+            "action": "Proceed with standard regimen",
+            "monitoring": "Routine monitoring",
+            "summary": "Normal CYP2D6 activity. Standard tramadol dosing appropriate.",
         },
     },
     "WARFARIN": {
+        "Sensitive": {
+            "risk_label": "Toxic",
+            "severity": "high",
+            "confidence": 0.94,
+            "dosage": "Reduce initial dose by 30–50%",
+            "action": "Initiate dose-reduction algorithm; frequent INR checks",
+            "monitoring": "INR every 2–3 days for first 2 weeks",
+            "summary": "VKORC1 A-allele patients are highly sensitive to warfarin — standard doses cause supratherapeutic anticoagulation and bleeding risk.",
+        },
         "Poor": {
-            "risk_label": "RISKY",
+            "risk_label": "Toxic",
             "severity": "high",
             "confidence": 0.91,
-            "dosage": "Reduce initial dose by 30–50 % · frequent INR monitoring",
-            "guidance": "CYP2C9 poor metabolizers clear warfarin slowly — high bleeding risk at standard doses.",
+            "dosage": "Reduce initial dose by 30–50%",
+            "action": "Use pharmacogenomics-guided dosing algorithm",
+            "monitoring": "Frequent INR monitoring; target INR 2–3",
+            "summary": "CYP2C9 poor metabolizers clear warfarin slowly — high bleeding risk at standard doses.",
         },
         "Intermediate": {
-            "risk_label": "MODERATE",
+            "risk_label": "Adjust Dosage",
             "severity": "moderate",
             "confidence": 0.88,
-            "dosage": "Reduce dose · monitor INR every 3–5 days initially",
-            "guidance": "Reduced CYP2C9 activity prolongs warfarin half-life; start lower and titrate.",
+            "dosage": "Reduce starting dose; titrate slowly",
+            "action": "Enhanced INR monitoring for first 4 weeks",
+            "monitoring": "INR every 3–5 days initially",
+            "summary": "Reduced CYP2C9 activity prolongs warfarin half-life; start lower and titrate carefully.",
         },
         "Normal": {
-            "risk_label": "SAFE",
+            "risk_label": "Safe",
             "severity": "low",
             "confidence": 0.93,
-            "dosage": "Standard dose algorithm · routine INR monitoring",
-            "guidance": "CYP2C9 normal metabolizer. Use standard dose algorithm.",
+            "dosage": "Standard dose algorithm",
+            "action": "Use standard initiation protocol",
+            "monitoring": "Routine INR monitoring",
+            "summary": "Normal CYP2C9/VKORC1 profile. Standard warfarin algorithm is appropriate.",
         },
     },
     "CLOPIDOGREL": {
         "Poor": {
-            "risk_label": "RISKY",
+            "risk_label": "Ineffective",
             "severity": "high",
             "confidence": 0.94,
-            "dosage": "Avoid — switch to prasugrel or ticagrelor",
-            "guidance": "CYP2C19 poor metabolizers cannot activate clopidogrel — major thrombosis risk.",
+            "dosage": "Avoid clopidogrel",
+            "action": "Switch to prasugrel or ticagrelor",
+            "monitoring": "Monitor platelet aggregation if clopidogrel continued",
+            "summary": "CYP2C19 poor metabolizers cannot activate clopidogrel — major platelet activation failure and thrombosis risk.",
         },
         "Intermediate": {
-            "risk_label": "MODERATE",
+            "risk_label": "Adjust Dosage",
             "severity": "moderate",
             "confidence": 0.87,
-            "dosage": "Consider alternative antiplatelet · or increase dose with monitoring",
-            "guidance": "Reduced clopidogrel activation; consult cardiology for alternative therapy.",
+            "dosage": "Consider alternative or increased dose under supervision",
+            "action": "Cardiology consultation recommended",
+            "monitoring": "Platelet function testing if available",
+            "summary": "Reduced CYP2C19 activity decreases clopidogrel conversion; consult cardiology for alternative antiplatelet.",
+        },
+        "Rapid": {
+            "risk_label": "Safe",
+            "severity": "low",
+            "confidence": 0.89,
+            "dosage": "Standard dose (75 mg/day)",
+            "action": "Proceed with standard regimen",
+            "monitoring": "Routine monitoring",
+            "summary": "Rapid/ultrarapid CYP2C19 — adequate clopidogrel activation expected.",
         },
         "Normal": {
-            "risk_label": "SAFE",
+            "risk_label": "Safe",
             "severity": "low",
             "confidence": 0.92,
             "dosage": "Standard dose (75 mg/day)",
-            "guidance": "Normal CYP2C19 activity. Standard clopidogrel dosing is appropriate.",
-        },
-        "Rapid": {
-            "risk_label": "SAFE",
-            "severity": "low",
-            "confidence": 0.89,
-            "dosage": "Standard dose",
-            "guidance": "Rapid/ultrarapid CYP2C19 — adequate antiplatelet effect expected.",
+            "action": "Proceed with standard regimen",
+            "monitoring": "Routine monitoring",
+            "summary": "Normal CYP2C19 activity. Standard clopidogrel dosing appropriate.",
         },
     },
     "SIMVASTATIN": {
         "Poor": {
-            "risk_label": "RISKY",
+            "risk_label": "Toxic",
             "severity": "high",
             "confidence": 0.92,
-            "dosage": "Avoid high-dose simvastatin · switch to rosuvastatin/pravastatin",
-            "guidance": "SLCO1B1 poor function increases statin plasma levels — myopathy/rhabdomyolysis risk.",
+            "dosage": "Avoid high-dose simvastatin",
+            "action": "Switch to rosuvastatin or pravastatin",
+            "monitoring": "CK levels and muscle symptom assessment",
+            "summary": "SLCO1B1 poor function elevates statin plasma concentrations — myopathy and rhabdomyolysis risk.",
         },
         "Intermediate": {
-            "risk_label": "MODERATE",
+            "risk_label": "Adjust Dosage",
             "severity": "moderate",
             "confidence": 0.88,
-            "dosage": "Cap dose at 20 mg/day · monitor CK levels",
-            "guidance": "Diminished SLCO1B1 transport raises myopathy risk at higher simvastatin doses.",
+            "dosage": "Cap dose at 20 mg/day",
+            "action": "Consider alternative statin at lower myopathy risk",
+            "monitoring": "Monitor CK every 3 months",
+            "summary": "Reduced SLCO1B1 transport raises myopathy risk at higher simvastatin doses.",
         },
         "Normal": {
-            "risk_label": "SAFE",
+            "risk_label": "Safe",
             "severity": "low",
             "confidence": 0.94,
             "dosage": "Standard dose",
-            "guidance": "Normal SLCO1B1 function. Standard simvastatin strategy is appropriate.",
+            "action": "Proceed with standard regimen",
+            "monitoring": "Annual CK and lipid panel",
+            "summary": "Normal SLCO1B1 function. Standard simvastatin strategy is appropriate.",
         },
     },
     "AZATHIOPRINE": {
         "Poor": {
-            "risk_label": "RISKY",
-            "severity": "critical",
+            "risk_label": "Toxic",
+            "severity": "high",
             "confidence": 0.96,
-            "dosage": "Avoid or use 10 % of standard dose · intensive CBC monitoring",
-            "guidance": "TPMT poor metabolizers accumulate toxic thiopurines — severe myelosuppression risk.",
+            "dosage": "Avoid or use 10% of standard dose",
+            "action": "Intensive CBC monitoring; consider alternative immunosuppressant",
+            "monitoring": "CBC weekly for 8 weeks",
+            "summary": "TPMT poor metabolizers accumulate toxic thiopurine metabolites — severe myelosuppression risk.",
         },
         "Intermediate": {
-            "risk_label": "MODERATE",
-            "severity": "high",
+            "risk_label": "Adjust Dosage",
+            "severity": "moderate",
             "confidence": 0.91,
-            "dosage": "Start at 50 % dose · monitor CBC weekly for 8 weeks",
-            "guidance": "Reduced TPMT activity increases thiopurine toxicity; dose reduction essential.",
+            "dosage": "Start at 50% of standard dose",
+            "action": "Increase dose cautiously based on CBC response",
+            "monitoring": "CBC weekly for first 8 weeks",
+            "summary": "Reduced TPMT activity increases thiopurine toxicity; dose reduction is essential.",
         },
         "Normal": {
-            "risk_label": "SAFE",
+            "risk_label": "Safe",
             "severity": "low",
             "confidence": 0.95,
-            "dosage": "Standard dose · routine CBC monitoring",
-            "guidance": "Normal TPMT activity. Standard azathioprine dosing with routine monitoring.",
+            "dosage": "Standard dose",
+            "action": "Proceed with standard regimen",
+            "monitoring": "Routine CBC monitoring",
+            "summary": "Normal TPMT activity. Standard azathioprine dosing appropriate.",
         },
     },
     "FLUOROURACIL": {
         "Poor": {
-            "risk_label": "RISKY",
-            "severity": "critical",
+            "risk_label": "Toxic",
+            "severity": "high",
             "confidence": 0.94,
-            "dosage": "Avoid or reduce dose by ≥ 50 % · consider alternative",
-            "guidance": "DPYD poor metabolizers cannot clear 5-FU — life-threatening mucositis/neutropenia.",
+            "dosage": "Reduce dose by ≥50% or avoid",
+            "action": "Mandatory dose reduction; consider alternative chemotherapy",
+            "monitoring": "Toxicity monitoring: mucositis, neutropenia, diarrhea",
+            "summary": "DPYD poor metabolizers cannot clear 5-FU — life-threatening mucositis and neutropenia risk.",
         },
         "Intermediate": {
-            "risk_label": "MODERATE",
-            "severity": "high",
+            "risk_label": "Adjust Dosage",
+            "severity": "moderate",
             "confidence": 0.89,
-            "dosage": "Start at 50 % dose · titrate based on toxicity",
-            "guidance": "Intermediate DPYD activity raises severe toxicity risk at standard 5-FU doses.",
+            "dosage": "Start at 50% dose; titrate based on toxicity",
+            "action": "Oncology-supervised dose escalation",
+            "monitoring": "Weekly CBC and toxicity assessment for 4 weeks",
+            "summary": "Intermediate DPYD activity raises severe toxicity risk at standard fluorouracil doses.",
         },
         "Normal": {
-            "risk_label": "SAFE",
+            "risk_label": "Safe",
             "severity": "low",
             "confidence": 0.93,
-            "dosage": "Standard dose · routine oncology monitoring",
-            "guidance": "Normal DPYD activity. Standard fluorouracil dosing with standard monitoring.",
+            "dosage": "Standard dose",
+            "action": "Proceed with standard oncology protocol",
+            "monitoring": "Standard oncology monitoring",
+            "summary": "Normal DPYD activity. Standard fluorouracil dosing is appropriate.",
         },
     },
 }
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VCF PARSING ENGINE
@@ -345,67 +411,88 @@ class Variant:
     gene: str
     star: str
     genotype: str
+    phenotype_hint: str = ""
 
 
-def parse_info_field(info_field: str) -> Dict[str, str]:
-    info: Dict[str, str] = {}
-    for part in info_field.split(";"):
-        if "=" in part:
-            k, v = part.split("=", 1)
-            info[k] = v
-        elif part:
-            info[part] = "true"
-    return info
+def _parse_info(raw: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for tok in raw.split(";"):
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            out[k.strip()] = v.strip()
+        elif tok.strip():
+            out[tok.strip()] = "true"
+    return out
 
 
-def normalize_genotype(sample_col: str) -> str:
+def _norm_gt(sample_col: str) -> str:
     return sample_col.split(":", 1)[0].replace("|", "/")
 
 
-def parse_vcf(vcf_content: str) -> List[Variant]:
+def parse_vcf(content: str) -> List[Variant]:
     variants: List[Variant] = []
-    for raw_line in vcf_content.splitlines():
-        line = raw_line.strip()
+    for raw in content.splitlines():
+        line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        fields = line.split("\t")
-        if len(fields) < 8:
+        cols = line.split("\t")
+        if len(cols) < 8:
             continue
-        chrom, pos, vid, ref, alt = fields[0], fields[1], fields[2], fields[3], fields[4]
-        info = parse_info_field(fields[7])
-        rsid  = info.get("RS") or (vid if vid.startswith("rs") else "")
+        chrom, pos_s, vid, ref, alt = cols[0], cols[1], cols[2], cols[3], cols[4]
+        info = _parse_info(cols[7])
+
+        rsid = (info.get("RS") or info.get("RSID") or
+                (vid if vid.startswith("rs") else ""))
         gene  = info.get("GENE", "")
         star  = info.get("STAR", "")
-        fmt   = fields[8] if len(fields) > 8 else ""
-        samp  = fields[9] if len(fields) > 9 else ""
-        gt    = normalize_genotype(samp) if fmt and samp else "0/1"
+        phint = info.get("PHENOTYPE", "")
+
+        # Infer gene from known rsID table if missing
+        if not gene:
+            for g, rs_map in RS_TO_STAR.items():
+                if rsid in rs_map:
+                    gene = g
+                    break
+
+        gt_raw = cols[9] if len(cols) > 9 else ("0/1" if len(cols) > 8 else "0/1")
+        gt = _norm_gt(gt_raw) if gt_raw else "0/1"
         if gt == "0/0":
             continue
+
         try:
-            pos_int = int(pos)
+            pos_int = int(pos_s)
         except ValueError:
             continue
-        variants.append(Variant(chrom, pos_int, rsid, ref, alt, gene, star, gt))
+
+        variants.append(Variant(chrom, pos_int, rsid, ref, alt, gene, star, gt, phint))
     return variants
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# DIPLOTYPE + PHENOTYPE INFERENCE
+# ─────────────────────────────────────────────────────────────────────────────
+
 def infer_diplotype(gene: str, variants: List[Variant]) -> str:
     rs_map = RS_TO_STAR.get(gene, {})
-    gvars  = [v for v in variants if v.gene == gene or (v.rsid and v.rsid in rs_map)]
-    if not gvars:
-        return "*1/*1"
+    gv = [v for v in variants if v.gene == gene or (v.rsid and v.rsid in rs_map)]
+    if not gv:
+        return "*1/*1" if gene != "VKORC1" else "G/G"
+
     observed: List[str] = []
-    for v in gvars:
-        allele = rs_map.get(v.rsid) or (v.star if v.star.startswith("*") else "*1")
+    for v in gv:
+        allele = rs_map.get(v.rsid) or (v.star if v.star.startswith("*") else
+                 ("A" if gene == "VKORC1" else "*1"))
         if v.genotype == "1/1":
             return "/".join(sorted([allele, allele]))
-        if allele != "*1":
+        if allele not in ("*1", "G"):
             observed.append(allele)
+
     if not observed:
-        return "*1/*1"
+        return "*1/*1" if gene != "VKORC1" else "G/G"
     unique = sorted(list(dict.fromkeys(observed)))
+    default_ref = "*1" if gene != "VKORC1" else "G"
     if len(unique) == 1:
-        return "/".join(sorted(["*1", unique[0]]))
+        return "/".join(sorted([default_ref, unique[0]]))
     return "/".join(sorted([unique[0], unique[1]]))
 
 
@@ -413,37 +500,39 @@ def infer_phenotype(gene: str, diplotype: str) -> Tuple[str, str, float]:
     mapping = PHENOTYPE_MAP.get(gene, {})
     if diplotype in mapping:
         return mapping[diplotype]
-    # check if any allele is an ultrarapid marker (*17, *2xN pattern)
+    # Heuristics for unseen diplotypes
     stars = diplotype.split("/")
-    if any("17" in s for s in stars):
-        return "Ultrarapid Metabolizer", "Ultrarapid", 0.87
-    if "*1/*1" in mapping:
-        n, a, c = mapping["*1/*1"]
+    if any(s in ("*17",) for s in stars):
+        return "Ultrarapid Metabolizer", "Ultrarapid", 0.86
+    if any(s in ("A",) for s in stars) and gene == "VKORC1":
+        if stars.count("A") == 2:
+            return "Warfarin-Sensitive", "Sensitive", 0.90
+        return "Warfarin-Intermediate", "Intermediate", 0.85
+    ref = mapping.get("*1/*1") or mapping.get("G/G")
+    if ref:
+        n, a, c = ref
         return f"Likely {n}", a, round(c - 0.12, 2)
     return "Unknown Phenotype", "Normal", 0.60
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# METABOLIZER HINT: read from filename & VCF comment lines
+# METABOLIZER HINT DETECTION (filename / VCF header keywords)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_HINT_KEYWORDS = {
-    "ultrarapid": "Ultrarapid",
-    "ultra_rapid": "Ultrarapid",
-    "ultra rapid": "Ultrarapid",
-    "ultrarapidmetabolizer": "Ultrarapid",
-    "poor":        "Poor",
-    "poormetabolizer": "Poor",
-    "intermediate": "Intermediate",
+_HINT_MAP = {
+    "ultrarapid": "Ultrarapid", "ultrarápid": "Ultrarapid",
+    "poor":        "Poor",       "poormetab":  "Poor",
+    "intermediate":"Intermediate",
     "rapid":       "Rapid",
+    "sensitive":   "Sensitive",
     "normal":      "Normal",
 }
 
-def _extract_metabolizer_hint(filename: str, vcf_content: str) -> Optional[str]:
-    """Return an activity bucket if a hint is found in filename or VCF header."""
-    haystack = (filename + " " + vcf_content[:2000]).lower().replace("-", "").replace("_", "")
-    for kw, bucket in _HINT_KEYWORDS.items():
-        if kw.replace("_", "").replace(" ", "") in haystack:
+def _detect_hint(filename: str, content: str) -> Optional[str]:
+    hay = (filename + " " + content[:3000]).lower()
+    hay_clean = hay.replace("-", "").replace("_", "").replace(" ", "")
+    for kw, bucket in _HINT_MAP.items():
+        if kw.replace(" ", "") in hay_clean:
             return bucket
     return None
 
@@ -452,261 +541,300 @@ def _extract_metabolizer_hint(filename: str, vcf_content: str) -> Optional[str]:
 # RISK LOOKUP
 # ─────────────────────────────────────────────────────────────────────────────
 
-def risk_for(drug: str, activity: str, confidence: float) -> Dict[str, Any]:
+def _risk_for(drug: str, activity: str, confidence: float) -> Dict[str, Any]:
     rules = RISK_RULES.get(drug, {})
-    rule  = rules.get(activity) or rules.get("Normal") or {
-        "risk_label": "UNKNOWN",
-        "severity":   "none",
+    rule = rules.get(activity) or rules.get("Normal") or {
+        "risk_label": "Unknown",
+        "severity": "none",
         "confidence": 0.60,
-        "dosage":     "Consult specialist",
-        "guidance":   "Insufficient pharmacogenomic evidence for this drug-gene pair.",
+        "dosage": "Consult specialist",
+        "action": "Seek specialist pharmacogenomics consultation",
+        "monitoring": "Clinical monitoring per treatment protocol",
+        "summary": "Insufficient pharmacogenomic evidence for this drug-gene combination.",
     }
     return {
         "risk_label":       rule["risk_label"],
         "severity":         rule["severity"],
         "confidence_score": min(1.0, round(rule["confidence"] * confidence, 3)),
         "dosage":           rule["dosage"],
-        "guidance":         rule["guidance"],
+        "action":           rule["action"],
+        "monitoring":       rule["monitoring"],
+        "summary":          rule["summary"],
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAIN ANALYSIS FUNCTION
+# MASTER ANALYSIS FUNCTION  →  Strict JSON schema output
 # ─────────────────────────────────────────────────────────────────────────────
 
-def analyze(
+def run_analysis_core(
     vcf_content: str,
     drug: str,
-    patient_id: Optional[str],
+    patient_id: str,
     filename: str = "",
     metabolizer_override: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """
+    Returns a dict that EXACTLY matches the RIFT 2026 required JSON schema.
+    """
+    drug = drug.upper().strip()
     if drug not in DRUG_GENE_MAP:
-        raise ValueError(f"Unsupported drug: {drug}")
+        raise ValueError(f"Unsupported drug '{drug}'. Supported: {', '.join(DRUG_GENE_MAP)}")
 
-    primary_gene = DRUG_GENE_MAP[drug]
-    pid = (patient_id or "").strip() or f"PAT-{int(datetime.now().timestamp())}"
+    pid = patient_id.strip() or f"PATIENT_{int(datetime.now(timezone.utc).timestamp())}"
+    genes       = DRUG_GENE_MAP[drug]
+    primary_gene = genes[0]
 
-    # ── VCF-based diplotype ──────────────────────────────────────────────────
-    if vcf_content and "#CHROM" in vcf_content:
-        variants  = parse_vcf(vcf_content)
-        diplotype = infer_diplotype(primary_gene, variants)
-        phenotype_name, activity, pheno_conf = infer_phenotype(primary_gene, diplotype)
+    # ── VCF path ─────────────────────────────────────────────────────────────
+    vcf_ok  = bool(vcf_content and "#CHROM" in vcf_content)
+    variants: List[Variant] = []
+    if vcf_ok:
+        variants = parse_vcf(vcf_content)
 
-        # Override activity if filename/header hint found
-        hint = _extract_metabolizer_hint(filename, vcf_content)
+    diplotype = infer_diplotype(primary_gene, variants) if vcf_ok else "N/A"
+    phenotype_name, activity, pheno_conf = (
+        infer_phenotype(primary_gene, diplotype) if vcf_ok
+        else ("Unknown Phenotype", "Normal", 0.75)
+    )
+
+    # ── Override / filename hint ──────────────────────────────────────────────
+    if metabolizer_override and metabolizer_override != "Auto-detect from VCF":
+        activity = metabolizer_override
+        pheno_conf = min(pheno_conf + 0.05, 0.99)
+    elif not vcf_ok:
+        hint = _detect_hint(filename, vcf_content or "")
         if hint:
             activity = hint
-            pheno_conf = min(pheno_conf + 0.05, 0.99)
 
-        detected = [
-            {
-                "rsid":       v.rsid or f"novel_{v.position}",
-                "chromosome": f"chr{v.chromosome}" if not v.chromosome.startswith("chr") else v.chromosome,
-                "position":   v.position,
-                "starAllele": v.star or "*1",
-                "genotype":   v.genotype,
-            }
-            for v in variants
-            if v.gene == primary_gene or v.rsid in RS_TO_STAR.get(primary_gene, {})
-        ]
-        input_mode = "VCF"
-    else:
-        # ── Text / quick-mode ────────────────────────────────────────────────
-        activity      = metabolizer_override or "Normal"
-        pheno_conf    = 0.85
-        diplotype     = "N/A (text input)"
-        phenotype_name = f"{activity} Metabolizer"
-        detected      = []
-        input_mode    = "Text"
+    # VKORC1 secondary gene (Warfarin special-case)
+    if drug == "WARFARIN" and vcf_ok:
+        vkorc_dip = infer_diplotype("VKORC1", variants)
+        _, vkorc_act, vkorc_conf = infer_phenotype("VKORC1", vkorc_dip)
+        if vkorc_act == "Sensitive":   # VKORC1 sensitivity overrides
+            activity   = "Sensitive"
+            pheno_conf = vkorc_conf
 
-    risk = risk_for(drug, activity, pheno_conf)
+    risk = _risk_for(drug, activity, pheno_conf)
 
+    # Detected variants (primary gene only)
+    detected: List[Dict[str, Any]] = [
+        {
+            "rsid":        v.rsid or f"novel_{v.position}",
+            "gene":        v.gene or primary_gene,
+            "chromosome":  f"chr{v.chromosome}" if not v.chromosome.startswith("chr") else v.chromosome,
+            "position":    v.position,
+            "ref":         v.ref,
+            "alt":         v.alt,
+            "star_allele": v.star or "*1",
+            "genotype":    v.genotype,
+        }
+        for v in variants
+        if v.gene == primary_gene
+        or v.rsid in RS_TO_STAR.get(primary_gene, {})
+        or v.rsid in RS_TO_STAR.get("VKORC1", {})
+    ]
+
+    # ── STRICT SCHEMA ─────────────────────────────────────────────────────────
     return {
-        "patient_id": pid,
-        "drug": drug,
-        "input_mode": input_mode,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "patient_id":  pid,
+        "drug":        drug,
+        "timestamp":   datetime.now(timezone.utc).isoformat(),
         "risk_assessment": {
             "risk_label":       risk["risk_label"],
-            "severity":         risk["severity"],
             "confidence_score": risk["confidence_score"],
+            "severity":         risk["severity"],
         },
         "pharmacogenomic_profile": {
-            "primary_gene": primary_gene,
-            "diplotype":    diplotype,
-            "phenotype":    phenotype_name,
-            "activity":     activity,
+            "primary_gene":      primary_gene,
+            "diplotype":         diplotype,
+            "phenotype":         phenotype_name,
             "detected_variants": detected,
         },
         "clinical_recommendation": {
-            "dosage":           risk["dosage"],
-            "dosing_guidance":  risk["guidance"],
-            "cpic_level":       "A",
-            "guideline_source": "CPIC-aligned pharmacogenomic rules",
+            "dosage":    risk["dosage"],
+            "action":    risk["action"],
+            "monitoring": risk["monitoring"],
+        },
+        "llm_generated_explanation": {
+            "summary": risk["summary"],
+        },
+        "quality_metrics": {
+            "vcf_parsing_success": vcf_ok,
+            "variants_detected":   len(detected),
+            "llm_confidence":      risk["confidence_score"],
         },
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HTML CARD RENDERER  (Apollo-style)
+# JSON REPORT WRITER
 # ─────────────────────────────────────────────────────────────────────────────
 
-_STYLES: Dict[str, Dict[str, str]] = {
-    "low": {
-        "accent": "#006838", "badge_bg": "#006838", "badge_text": "#fff",
-        "card_border": "#34a853", "card_bg": "#f0faf4",
-        "icon": "✔", "label": "SAFE",
-    },
-    "moderate": {
-        "accent": "#b26a00", "badge_bg": "#f9a825", "badge_text": "#5d3a00",
-        "card_border": "#f9a825", "card_bg": "#fffbf0",
-        "icon": "⚠", "label": "MODERATE RISK",
-    },
-    "high": {
-        "accent": "#c5221f", "badge_bg": "#c5221f", "badge_text": "#fff",
-        "card_border": "#ea4335", "card_bg": "#fff5f5",
-        "icon": "🔴", "label": "HIGH RISK",
-    },
-    "critical": {
-        "accent": "#7b1a18", "badge_bg": "#7b1a18", "badge_text": "#fff",
-        "card_border": "#c5221f", "card_bg": "#fff0f0",
-        "icon": "🚨", "label": "CRITICAL — AVOID",
-    },
-    "none": {
-        "accent": "#5f6368", "badge_bg": "#9aa0a6", "badge_text": "#fff",
-        "card_border": "#dadce0", "card_bg": "#f8f9fa",
-        "icon": "❓", "label": "UNKNOWN",
-    },
+def save_json_report(result: Dict[str, Any]) -> str:
+    """Write result to a temp file and return the path for gr.File download."""
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", prefix="pharmaguard_",
+        delete=False, encoding="utf-8"
+    )
+    json.dump(result, tmp, indent=4)
+    tmp.close()
+    return tmp.name
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HTML CARD RENDERER — Apollo / Medical style
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BADGE: Dict[str, Dict[str, str]] = {
+    "Safe":          {"bg": "#006838", "fg": "#fff", "icon": "✔",  "border": "#34a853", "card": "#f0faf4"},
+    "Adjust Dosage": {"bg": "#f9a825", "fg": "#3e2800","icon": "⚠", "border": "#f9a825","card": "#fffbf0"},
+    "Toxic":         {"bg": "#c5221f", "fg": "#fff",  "icon": "🚨","border": "#ea4335","card": "#fff5f5"},
+    "Ineffective":   {"bg": "#7b3f00", "fg": "#fff",  "icon": "🔴","border": "#d84315","card": "#fff8f5"},
+    "Unknown":       {"bg": "#5f6368", "fg": "#fff",  "icon": "❓","border": "#9aa0a6","card": "#f8f9fa"},
 }
 
 def _conf_bar(score: float, color: str) -> str:
     pct = int(score * 100)
-    return f"""
-    <div style="margin:12px 0 4px">
-      <div style="display:flex;justify-content:space-between;margin-bottom:4px">
-        <span style="font-size:11px;font-weight:600;color:#5f6368;text-transform:uppercase;letter-spacing:.05em">AI Confidence</span>
-        <span style="font-size:12px;font-weight:700;color:#202124">{pct}%</span>
-      </div>
-      <div style="background:#e0e0e0;border-radius:99px;height:7px;overflow:hidden">
-        <div style="width:{pct}%;height:100%;background:{color};border-radius:99px"></div>
-      </div>
-    </div>"""
+    return (
+        f'<div style="margin:10px 0 4px">'
+        f'<div style="display:flex;justify-content:space-between;margin-bottom:3px">'
+        f'<span style="font-size:11px;font-weight:600;color:#5f6368;text-transform:uppercase;letter-spacing:.05em">AI Confidence</span>'
+        f'<span style="font-size:12px;font-weight:700;color:#202124">{pct}%</span></div>'
+        f'<div style="background:#e0e0e0;border-radius:99px;height:7px;overflow:hidden">'
+        f'<div style="width:{pct}%;height:100%;background:{color};border-radius:99px"></div>'
+        f'</div></div>'
+    )
 
-def _variant_rows(detected: list) -> str:
-    if not detected:
-        return ""
-    rows = "".join(
-        f"""<tr>
-  <td style="padding:7px 10px;font-size:12px;font-family:monospace">{v['rsid']}</td>
-  <td style="padding:7px 10px;font-size:12px">{v['chromosome']}</td>
-  <td style="padding:7px 10px;font-size:12px;font-family:monospace">{v['starAllele']}</td>
-  <td style="padding:7px 10px;font-size:12px;font-family:monospace">{v['genotype']}</td>
-</tr>""" for v in detected)
-    return f"""
-    <div style="margin-top:16px">
-      <p style="font-size:11px;font-weight:700;color:#5f6368;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Detected Variants</p>
-      <table style="width:100%;border-collapse:collapse;font-size:12px;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden">
-        <thead><tr style="background:#f5f5f5">
-          <th style="padding:7px 10px;text-align:left;font-size:11px;color:#5f6368">rsID</th>
-          <th style="padding:7px 10px;text-align:left;font-size:11px;color:#5f6368">Chr</th>
-          <th style="padding:7px 10px;text-align:left;font-size:11px;color:#5f6368">Star</th>
-          <th style="padding:7px 10px;text-align:left;font-size:11px;color:#5f6368">Genotype</th>
-        </tr></thead>
-        <tbody style="border-top:1px solid #e0e0e0">{rows}</tbody>
-      </table>
-    </div>"""
+def _variant_table(rows: List[Dict]) -> str:
+    if not rows:
+        return '<p style="font-size:12px;color:#9aa0a6;margin-top:10px">No pharmacogenomic variants detected in uploaded VCF.</p>'
+    trs = "".join(
+        f'<tr style="border-bottom:1px solid #f0f0f0">'
+        f'<td style="padding:6px 10px;font-family:monospace;font-size:12px">{r["rsid"]}</td>'
+        f'<td style="padding:6px 10px;font-size:12px">{r["gene"]}</td>'
+        f'<td style="padding:6px 10px;font-family:monospace;font-size:12px">{r.get("star_allele","")}</td>'
+        f'<td style="padding:6px 10px;font-family:monospace;font-size:12px">{r["genotype"]}</td>'
+        f'</tr>'
+        for r in rows
+    )
+    return (
+        f'<div style="margin-top:14px">'
+        f'<p style="font-size:11px;font-weight:700;color:#5f6368;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Detected Variants</p>'
+        f'<table style="width:100%;border-collapse:collapse;border:1px solid #e8eaed;border-radius:8px;overflow:hidden">'
+        f'<thead><tr style="background:#f5f7ff">'
+        f'<th style="padding:6px 10px;text-align:left;font-size:11px;color:#0057b8">rsID</th>'
+        f'<th style="padding:6px 10px;text-align:left;font-size:11px;color:#0057b8">Gene</th>'
+        f'<th style="padding:6px 10px;text-align:left;font-size:11px;color:#0057b8">Star</th>'
+        f'<th style="padding:6px 10px;text-align:left;font-size:11px;color:#0057b8">Genotype</th>'
+        f'</tr></thead><tbody>{trs}</tbody></table></div>'
+    )
 
-def render_result_card(result: Dict[str, Any]) -> str:
-    ra  = result["risk_assessment"]
-    pgp = result["pharmacogenomic_profile"]
-    cr  = result["clinical_recommendation"]
-    s   = _STYLES.get(ra["severity"], _STYLES["none"])
-    ts  = result.get("timestamp", "")
+def render_card(result: Dict[str, Any]) -> str:
+    ra    = result["risk_assessment"]
+    pgp   = result["pharmacogenomic_profile"]
+    cr    = result["clinical_recommendation"]
+    exp   = result["llm_generated_explanation"]
+    qm    = result["quality_metrics"]
+    label = ra["risk_label"]
+    b     = _BADGE.get(label, _BADGE["Unknown"])
+    ts    = result.get("timestamp", "")
     try:
-        ts_fmt = datetime.fromisoformat(ts.replace("Z","+00:00")).strftime("%d %b %Y, %H:%M UTC")
+        ts_fmt = datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%d %b %Y, %H:%M UTC")
     except Exception:
         ts_fmt = ts
 
-    return f"""
-<div style="font-family:'Segoe UI',Roboto,Arial,sans-serif;max-width:700px;margin:0 auto">
+    vcf_tag = (
+        '<span style="background:#e8f5e9;color:#2e7d32;border-radius:99px;padding:2px 10px;font-size:11px;font-weight:600">✔ VCF Parsed</span>'
+        if qm["vcf_parsing_success"] else
+        '<span style="background:#fff3e0;color:#e65100;border-radius:99px;padding:2px 10px;font-size:11px;font-weight:600">⚠ Text Mode</span>'
+    )
 
-  <!-- Apollo-style header bar -->
-  <div style="background:linear-gradient(90deg,#0057b8 0%,#003f8a 100%);
-              border-radius:12px 12px 0 0;padding:16px 22px;display:flex;align-items:center;gap:12px">
-    <div style="background:rgba(255,255,255,0.15);border-radius:50%;width:40px;height:40px;
-                display:flex;align-items:center;justify-content:center;font-size:20px">🛡️</div>
-    <div>
-      <div style="font-size:16px;font-weight:700;color:#fff">PharmaGuard AI — Risk Assessment</div>
-      <div style="font-size:11px;color:rgba(255,255,255,0.7);margin-top:2px">
-        AI-powered Drug Safety &amp; Dosage Intelligence · CPIC-aligned
+    return f"""
+<div style="font-family:'Segoe UI',Roboto,Arial,sans-serif;max-width:740px;margin:0 auto">
+
+  <!-- Apollo top bar -->
+  <div style="background:linear-gradient(90deg,#0057b8,#003f8a);border-radius:12px 12px 0 0;
+              padding:16px 22px;display:flex;align-items:center;gap:12px">
+    <div style="background:rgba(255,255,255,.15);border-radius:50%;width:44px;height:44px;
+                display:flex;align-items:center;justify-content:center;font-size:22px">🛡️</div>
+    <div style="flex:1">
+      <div style="font-size:15px;font-weight:700;color:#fff">PharmaGuard AI — Risk Assessment Report</div>
+      <div style="font-size:11px;color:rgba(255,255,255,.7);margin-top:2px">
+        Precision Drug Safety · CPIC-aligned · RIFT 2026 HealthTech
       </div>
     </div>
+    {vcf_tag}
   </div>
 
-  <!-- Main card body -->
-  <div style="background:{s['card_bg']};border:1.5px solid {s['card_border']};border-top:none;
-              border-radius:0 0 12px 12px;padding:22px 22px 18px;
-              box-shadow:0 4px 18px rgba(0,0,0,0.08)">
+  <!-- Card body -->
+  <div style="background:{b['card']};border:1.5px solid {b['border']};border-top:none;
+              border-radius:0 0 12px 12px;padding:20px 22px 18px;
+              box-shadow:0 4px 20px rgba(0,0,0,.08)">
 
-    <!-- Drug + Patient row -->
-    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">
-      <span style="background:#e8f0fe;color:#1a73e8;border-radius:99px;
-                   padding:4px 13px;font-size:12px;font-weight:600">💊 {result['drug']}</span>
-      <span style="background:#f1f3f4;color:#3c4043;border-radius:99px;
-                   padding:4px 13px;font-size:12px;font-weight:500">🧬 {pgp['primary_gene']} · {pgp['diplotype']}</span>
-      <span style="background:#f1f3f4;color:#3c4043;border-radius:99px;
-                   padding:4px 13px;font-size:12px;font-weight:500">🔬 {pgp['phenotype']}</span>
-      <span style="background:#f1f3f4;color:#3c4043;border-radius:99px;
-                   padding:4px 13px;font-size:12px;font-weight:500">👤 {result['patient_id']}</span>
+    <!-- Pills row -->
+    <div style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:14px">
+      <span style="background:#e8f0fe;color:#1a73e8;border-radius:99px;padding:4px 13px;font-size:12px;font-weight:600">💊 {result['drug']}</span>
+      <span style="background:#f1f3f4;color:#3c4043;border-radius:99px;padding:4px 13px;font-size:12px">🧬 {pgp['primary_gene']} · {pgp['diplotype']}</span>
+      <span style="background:#f1f3f4;color:#3c4043;border-radius:99px;padding:4px 13px;font-size:12px">🔬 {pgp['phenotype']}</span>
+      <span style="background:#f1f3f4;color:#3c4043;border-radius:99px;padding:4px 13px;font-size:12px">👤 {result['patient_id']}</span>
     </div>
 
     <!-- Risk badge -->
-    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
-      <span style="background:{s['badge_bg']};color:{s['badge_text']};
-                   border-radius:99px;padding:7px 20px;font-size:14px;font-weight:800;
-                   letter-spacing:.07em;box-shadow:0 2px 8px rgba(0,0,0,0.18)">
-        {s['icon']}&nbsp;&nbsp;{s['label']}
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:4px">
+      <span style="background:{b['bg']};color:{b['fg']};border-radius:99px;
+                   padding:8px 22px;font-size:15px;font-weight:800;letter-spacing:.07em;
+                   box-shadow:0 2px 8px rgba(0,0,0,.18)">
+        {b['icon']}&nbsp;&nbsp;{label.upper()}
       </span>
-      <span style="font-size:13px;color:#5f6368">
-        Label: <strong style="color:{s['accent']}">{ra['risk_label']}</strong>
-      </span>
+      <span style="font-size:13px;color:#5f6368">Severity: <strong style="color:{b['bg']}">{ra['severity'].title()}</strong></span>
     </div>
 
     <!-- Confidence bar -->
-    {_conf_bar(ra['confidence_score'], s['accent'])}
+    {_conf_bar(ra['confidence_score'], b['bg'])}
 
-    <!-- Dosage recommendation box -->
-    <div style="margin-top:14px;background:#fff;border:1px solid {s['card_border']};
-                border-radius:10px;padding:14px 16px">
-      <p style="font-size:11px;font-weight:700;color:{s['accent']};text-transform:uppercase;
-                letter-spacing:.06em;margin:0 0 5px">💉 Dosage Recommendation</p>
+    <!-- Dosage box -->
+    <div style="margin-top:14px;background:#fff;border:1px solid {b['border']};
+                border-radius:10px;padding:13px 16px">
+      <p style="font-size:11px;font-weight:700;color:{b['bg']};text-transform:uppercase;
+                letter-spacing:.06em;margin:0 0 4px">💉 Dosage Recommendation</p>
       <p style="font-size:15px;font-weight:700;color:#202124;margin:0">{cr['dosage']}</p>
     </div>
 
-    <!-- Guidance box -->
-    <div style="margin-top:10px;background:#fff;border-left:4px solid {s['card_border']};
-                border-radius:0 10px 10px 0;padding:12px 16px">
-      <p style="font-size:11px;font-weight:700;color:{s['accent']};text-transform:uppercase;
-                letter-spacing:.06em;margin:0 0 5px">📋 Clinical Reasoning</p>
-      <p style="font-size:13px;color:#3c4043;margin:0;line-height:1.6">{cr['dosing_guidance']}</p>
+    <!-- Action row -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+      <div style="background:#fff;border:1px solid #e0e7ef;border-radius:10px;padding:11px 14px">
+        <p style="font-size:10px;font-weight:700;color:#0057b8;text-transform:uppercase;letter-spacing:.05em;margin:0 0 3px">⚡ Action</p>
+        <p style="font-size:12px;color:#3c4043;margin:0;line-height:1.5">{cr['action']}</p>
+      </div>
+      <div style="background:#fff;border:1px solid #e0e7ef;border-radius:10px;padding:11px 14px">
+        <p style="font-size:10px;font-weight:700;color:#0057b8;text-transform:uppercase;letter-spacing:.05em;margin:0 0 3px">👁 Monitoring</p>
+        <p style="font-size:12px;color:#3c4043;margin:0;line-height:1.5">{cr['monitoring']}</p>
+      </div>
     </div>
 
-    <!-- Variants table -->
-    {_variant_rows(pgp['detected_variants'])}
+    <!-- Explanation -->
+    <div style="margin-top:10px;background:#fff;border-left:4px solid {b['border']};
+                border-radius:0 10px 10px 0;padding:11px 15px">
+      <p style="font-size:10px;font-weight:700;color:{b['bg']};text-transform:uppercase;
+                letter-spacing:.06em;margin:0 0 4px">📋 Clinical Reasoning</p>
+      <p style="font-size:13px;color:#3c4043;margin:0;line-height:1.6">{exp['summary']}</p>
+    </div>
+
+    <!-- Variant table -->
+    {_variant_table(pgp['detected_variants'])}
 
     <!-- Footer -->
     <p style="margin-top:14px;font-size:10px;color:#9aa0a6;text-align:right">
-      CPIC-aligned · {ts_fmt} · Input: {result.get('input_mode','VCF')}
+      CPIC-aligned · {ts_fmt} · Variants: {qm['variants_detected']}
     </p>
   </div>
 </div>"""
 
 
-def render_error_card(msg: str) -> str:
+def render_error(msg: str) -> str:
     return f"""
-<div style="font-family:'Segoe UI',Roboto,Arial,sans-serif;max-width:700px;margin:0 auto">
-  <div style="background:#fce8e6;border:1.5px solid #ea4335;border-radius:12px;padding:22px 22px">
+<div style="font-family:'Segoe UI',Roboto,Arial,sans-serif;max-width:740px;margin:0 auto">
+  <div style="background:#fce8e6;border:1.5px solid #ea4335;border-radius:12px;padding:22px">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
       <span style="font-size:22px">🚨</span>
       <span style="font-size:16px;font-weight:700;color:#c5221f">Analysis Error</span>
@@ -720,13 +848,13 @@ def render_error_card(msg: str) -> str:
 # GRADIO HANDLER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_analysis(
+def gradio_run(
     vcf_file: Optional[str],
     vcf_text: str,
     drug: str,
     patient_id: str,
     metabolizer_hint: str,
-) -> Tuple[str, str]:
+) -> Tuple[str, Optional[str]]:
     try:
         content  = (vcf_text or "").strip()
         filename = ""
@@ -735,63 +863,55 @@ def run_analysis(
             with open(vcf_file, "r", encoding="utf-8", errors="replace") as fh:
                 content = fh.read()
 
-        override = metabolizer_hint if metabolizer_hint and metabolizer_hint != "Auto-detect from VCF" else None
-        result   = analyze(content, drug, patient_id, filename=filename, metabolizer_override=override)
-        return render_result_card(result), json.dumps(result, indent=2)
+        override = (metabolizer_hint
+                    if metabolizer_hint and metabolizer_hint != "Auto-detect from VCF"
+                    else None)
+
+        result   = run_analysis_core(content, drug, patient_id, filename, override)
+        report   = save_json_report(result)
+        return render_card(result), report
 
     except Exception as exc:
-        err = str(exc)
-        return render_error_card(err), json.dumps({"error": err}, indent=2)
+        err_json = save_json_report({"error": str(exc)})
+        return render_error(str(exc)), err_json
+
+
+def gradio_run_text(vcf_text: str, drug: str, pid: str, hint: str) -> Tuple[str, Optional[str]]:
+    return gradio_run(None, vcf_text, drug, pid, hint)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# APOLLO-STYLE CSS
+# CSS  (Apollo / Medical Blue)
 # ─────────────────────────────────────────────────────────────────────────────
 
-APOLLO_CSS = """
+CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono&display=swap');
 
 body, .gradio-container {
-    background: #f4f6fb !important;
+    background: #f0f4fb !important;
     font-family: 'Inter', 'Segoe UI', Arial, sans-serif !important;
 }
-
-/* Top header */
-.pharma-header {
-    background: linear-gradient(90deg, #0057b8 0%, #003f8a 100%);
-    padding: 0 !important;
-    margin-bottom: 0 !important;
-}
-
-/* Input card */
 .input-card {
-    background: #ffffff;
-    border: 1px solid #e0e7ef;
+    background: #fff !important;
+    border: 1px solid #dce6f5 !important;
     border-radius: 14px !important;
     padding: 22px !important;
-    box-shadow: 0 2px 12px rgba(0,87,184,0.07) !important;
+    box-shadow: 0 2px 14px rgba(0,87,184,.06) !important;
 }
-
-/* Analyze button */
-#pg-analyze-btn {
-    background: linear-gradient(90deg, #0057b8, #003f8a) !important;
+#pg-btn {
+    background: linear-gradient(90deg,#0057b8,#003f8a) !important;
     color: #fff !important;
     border: none !important;
     border-radius: 8px !important;
     font-weight: 700 !important;
     font-size: 15px !important;
     padding: 12px 0 !important;
-    letter-spacing: .03em !important;
-    box-shadow: 0 4px 14px rgba(0,87,184,0.3) !important;
-    transition: transform .15s, box-shadow .15s !important;
     width: 100% !important;
+    box-shadow: 0 4px 14px rgba(0,87,184,.28) !important;
+    transition: transform .15s, box-shadow .15s !important;
+    cursor: pointer !important;
 }
-#pg-analyze-btn:hover {
-    transform: translateY(-2px) !important;
-    box-shadow: 0 7px 20px rgba(0,87,184,0.45) !important;
-}
-
-/* JSON pane */
+#pg-btn:hover { transform: translateY(-2px) !important; box-shadow: 0 7px 20px rgba(0,87,184,.42) !important; }
 #json-out textarea {
     font-family: 'Roboto Mono', monospace !important;
     font-size: 11.5px !important;
@@ -800,121 +920,104 @@ body, .gradio-container {
     border-radius: 10px !important;
     border: 1px solid #30363d !important;
 }
-
-/* Section labels */
-.section-label {
-    font-size: 12px !important;
-    font-weight: 700 !important;
-    text-transform: uppercase !important;
-    letter-spacing: .06em !important;
-    color: #0057b8 !important;
-}
-
 label { font-weight: 600 !important; color: #1a237e !important; font-size: 13px !important; }
-
-.disclaimer-bar {
-    background: #fff8e1;
-    border: 1px solid #ffe082;
-    border-radius: 10px;
-    padding: 10px 16px;
-    font-size: 12px;
-    color: #795548;
-    text-align: center;
+.section-lbl {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .07em; color: #0057b8; margin-bottom: 4px;
+}
+.disclaimer {
+    background: #fff8e1; border: 1px solid #ffe082;
+    border-radius: 10px; padding: 10px 16px;
+    font-size: 12px; color: #795548; text-align: center;
 }
 """
 
-HEADER_HTML = """
-<div style="background:linear-gradient(90deg,#0057b8 0%,#003f8a 100%);
-            padding:22px 32px 18px;border-radius:0 0 0 0">
+HEADER = """
+<div style="background:linear-gradient(90deg,#0057b8,#003f8a);
+            padding:20px 30px 16px;border-radius:0">
   <div style="display:flex;align-items:center;gap:14px">
-    <div style="background:rgba(255,255,255,0.15);border-radius:12px;width:52px;height:52px;
+    <div style="background:rgba(255,255,255,.15);border-radius:12px;width:52px;height:52px;
                 display:flex;align-items:center;justify-content:center;font-size:28px">🛡️</div>
     <div>
-      <div style="font-size:24px;font-weight:800;color:#fff;letter-spacing:-.02em">PharmaGuard AI</div>
-      <div style="font-size:13px;color:rgba(255,255,255,0.75);margin-top:3px">
-        AI-powered Drug Safety &amp; Dosage Intelligence &nbsp;·&nbsp; Meta × Scaler Hackathon
+      <div style="font-size:22px;font-weight:800;color:#fff;letter-spacing:-.02em">PharmaGuard AI</div>
+      <div style="font-size:12px;color:rgba(255,255,255,.75);margin-top:3px">
+        Precision Drug Safety powered by Pharmacogenomics · RIFT 2026 HealthTech Hackathon
       </div>
     </div>
-    <div style="margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;gap:4px">
-      <span style="background:rgba(255,255,255,0.2);color:#fff;border-radius:99px;
-                   padding:3px 12px;font-size:11px;font-weight:700">CPIC-ALIGNED</span>
-      <span style="background:rgba(255,255,255,0.2);color:#fff;border-radius:99px;
-                   padding:3px 12px;font-size:11px;font-weight:700">DEMO v2.0</span>
+    <div style="margin-left:auto;display:flex;gap:6px;flex-direction:column;align-items:flex-end">
+      <span style="background:rgba(255,255,255,.2);color:#fff;border-radius:99px;padding:3px 12px;font-size:10px;font-weight:700">CPIC-ALIGNED</span>
+      <span style="background:rgba(255,255,255,.2);color:#fff;border-radius:99px;padding:3px 12px;font-size:10px;font-weight:700">v3.0 · DEMO</span>
     </div>
   </div>
 </div>
 """
 
-DISCLAIMER_HTML = """
-<div class="disclaimer-bar">
-  ⚠️ <strong>Research &amp; Demo Use Only</strong> — This tool does not constitute medical advice.
-  Always consult a licensed clinician before making any treatment decisions.
+DISCLAIMER = """
+<div class="disclaimer">
+  ⚠️ <strong>Research &amp; Demo Use Only.</strong>
+  This tool does not constitute medical advice. Always consult a licensed clinician before making treatment decisions.
 </div>
 """
 
-EMPTY_STATE_HTML = """
+EMPTY = """
 <div style="text-align:center;padding:48px 24px;color:#9aa0a6;
-            border:2px dashed #e0e7ef;border-radius:14px;background:#fafbff">
-  <div style="font-size:40px;margin-bottom:12px">🔬</div>
+            border:2px dashed #dce6f5;border-radius:14px;background:#fafbff">
+  <div style="font-size:42px;margin-bottom:14px">🔬</div>
   <div style="font-size:15px;font-weight:600;color:#5f6368">Awaiting Analysis</div>
-  <div style="font-size:13px;margin-top:6px">
-    Select a drug, upload / paste VCF, then click <strong>Run Analysis</strong>.
+  <div style="font-size:13px;margin-top:6px;line-height:1.6">
+    Select a drug · upload a VCF or paste content · click <strong>Run Analysis</strong>
+    <br>Or simply pick a <strong>Metabolizer Phenotype</strong> for an instant demo.
   </div>
 </div>
 """
 
-METABOLIZER_CHOICES = [
+METABOLIZER_OPTS = [
     "Auto-detect from VCF",
-    "Normal",
-    "Intermediate",
-    "Poor",
-    "Rapid",
-    "Ultrarapid",
+    "Normal", "Intermediate", "Rapid", "Poor", "Ultrarapid", "Sensitive",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GRADIO APP
+# BUILD GRADIO APP
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_app() -> gr.Blocks:
     with gr.Blocks(
-        title="PharmaGuard AI — Drug Safety Intelligence",
-        css=APOLLO_CSS,
+        title="PharmaGuard AI — RIFT 2026",
+        css=CSS,
         theme=gr.themes.Default(
             primary_hue="blue",
             font=[gr.themes.GoogleFont("Inter"), "sans-serif"],
         ),
     ) as demo:
 
-        gr.HTML(HEADER_HTML)
-        gr.HTML(DISCLAIMER_HTML)
+        gr.HTML(HEADER)
+        gr.HTML(DISCLAIMER)
 
-        with gr.Row(equal_height=False, elem_classes=["main-row"]):
+        with gr.Row(equal_height=False):
 
-            # ── LEFT: Inputs ─────────────────────────────────────────────────
+            # ── LEFT: inputs ────────────────────────────────────────────────
             with gr.Column(scale=1, min_width=300):
                 with gr.Group(elem_classes=["input-card"]):
-                    gr.HTML("<p class='section-label'>📋 Patient &amp; Drug Details</p>")
-
+                    gr.HTML('<p class="section-lbl">📋 Patient &amp; Drug</p>')
                     drug = gr.Dropdown(
                         label="Drug",
                         choices=list(DRUG_GENE_MAP.keys()),
                         value="MORPHINE",
-                        info="Select the drug to analyse pharmacogenomically",
+                        info="Pick the drug to analyse",
                     )
                     patient_id = gr.Textbox(
                         label="Patient ID (optional)",
-                        placeholder="e.g. PAT-001",
+                        placeholder="PATIENT_001",
                     )
                     metabolizer_hint = gr.Dropdown(
                         label="Metabolizer Phenotype Override",
-                        choices=METABOLIZER_CHOICES,
+                        choices=METABOLIZER_OPTS,
                         value="Auto-detect from VCF",
-                        info="Override for demos or text-only input",
+                        info="Override for demo use — set to Ultrarapid/Poor to see high-risk outputs",
                     )
 
-                    gr.HTML("<hr style='border:none;border-top:1px solid #e0e7ef;margin:12px 0'>")
-                    gr.HTML("<p class='section-label'>🧬 Genomic Input</p>")
+                    gr.HTML('<hr style="border:none;border-top:1px solid #e8edf5;margin:12px 0">')
+                    gr.HTML('<p class="section-lbl">🧬 Genomic Input</p>')
 
                     vcf_file = gr.File(
                         label="Upload VCF File",
@@ -927,64 +1030,84 @@ def build_app() -> gr.Blocks:
                         placeholder=(
                             "##fileformat=VCFv4.1\n"
                             "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n"
-                            "22\t42522613\trs3892097\tG\tA\t.\tPASS\tGENE=CYP2D6;STAR=*4\tGT\t0/1"
+                            "1\t94645694\trs3892097\tG\tA\t.\tPASS\tGENE=CYP2D6;STAR=*4\tGT\t0/1"
                         ),
                     )
-
                     analyze_btn = gr.Button(
                         "🔬  Run Analysis",
-                        elem_id="pg-analyze-btn",
+                        elem_id="pg-btn",
                         variant="primary",
                     )
 
-            # ── RIGHT: Output ────────────────────────────────────────────────
-            with gr.Column(scale=2, min_width=400):
-                gr.HTML("<p class='section-label'>📊 Risk Assessment Result</p>")
-                result_html = gr.HTML(value=EMPTY_STATE_HTML)
+            # ── RIGHT: outputs ──────────────────────────────────────────────
+            with gr.Column(scale=2, min_width=420):
+                gr.HTML('<p class="section-lbl">📊 Risk Assessment Result</p>')
+                result_html = gr.HTML(value=EMPTY)
 
-                gr.HTML("<p class='section-label' style='margin-top:18px'>🗂️ Structured JSON</p>")
-                output_json = gr.Textbox(
-                    label="",
-                    lines=16,
-                    elem_id="json-out",
-                    show_copy_button=True,
-                )
+                with gr.Row():
+                    with gr.Column(scale=3):
+                        gr.HTML('<p class="section-lbl" style="margin-top:16px">🗂️ Structured JSON (RIFT Schema)</p>')
+                        output_json = gr.Textbox(
+                            label="",
+                            lines=16,
+                            elem_id="json-out",
+                            show_copy_button=True,
+                        )
+                    with gr.Column(scale=1, min_width=160):
+                        gr.HTML('<p class="section-lbl" style="margin-top:16px">📥 Download</p>')
+                        download_file = gr.File(
+                            label="Clinical Report (JSON)",
+                        )
+
+        # ── Wire main button ─────────────────────────────────────────────────
+        def _full_run(vcf_f, vcf_t, d, pid, hint):
+            html, path = gradio_run(vcf_f, vcf_t, d, pid, hint)
+            try:
+                txt = open(path, encoding="utf-8").read() if path else ""
+            except Exception:
+                txt = ""
+            return html, txt, path
 
         analyze_btn.click(
-            fn=run_analysis,
+            fn=_full_run,
             inputs=[vcf_file, vcf_text, drug, patient_id, metabolizer_hint],
-            outputs=[result_html, output_json],
+            outputs=[result_html, output_json, download_file],
             api_name=False,
         )
 
-        # Examples panel — vcf_file excluded: passing None to gr.File in Examples
-        # causes Gradio to try hashing the /app directory on HF Spaces (IsADirectoryError).
-        # We wire examples only to the text-based inputs; vcf_file stays empty.
-        def _run_text_example(ex_vcf_text: str, ex_drug: str, ex_pid: str, ex_hint: str):
-            return run_analysis(None, ex_vcf_text, ex_drug, ex_pid, ex_hint)
+        # ── Examples (NO vcf_file to avoid HF IsADirectoryError) ────────────
+        def _example_run(vcf_t, d, pid, hint):
+            html, path = gradio_run_text(vcf_t, d, pid, hint)
+            try:
+                txt = open(path, encoding="utf-8").read() if path else ""
+            except Exception:
+                txt = ""
+            return html, txt, path
 
         gr.Examples(
             examples=[
-                ["", "MORPHINE",     "PAT-001", "Ultrarapid"],
-                ["", "MORPHINE",     "PAT-002", "Normal"],
-                ["", "CODEINE",      "PAT-003", "Ultrarapid"],
-                ["", "TRAMADOL",     "PAT-004", "Poor"],
-                ["", "WARFARIN",     "PAT-005", "Poor"],
-                ["", "CLOPIDOGREL",  "PAT-006", "Poor"],
-                ["", "AZATHIOPRINE", "PAT-007", "Poor"],
-                ["", "FLUOROURACIL", "PAT-008", "Poor"],
-                ["", "SIMVASTATIN",  "PAT-009", "Intermediate"],
+                ["", "MORPHINE",      "PAT-001", "Ultrarapid"],
+                ["", "MORPHINE",      "PAT-002", "Normal"],
+                ["", "CODEINE",       "PAT-003", "Ultrarapid"],
+                ["", "CODEINE",       "PAT-004", "Poor"],
+                ["", "CLOPIDOGREL",   "PAT-005", "Poor"],
+                ["", "WARFARIN",      "PAT-006", "Sensitive"],
+                ["", "WARFARIN",      "PAT-007", "Poor"],
+                ["", "AZATHIOPRINE",  "PAT-008", "Poor"],
+                ["", "FLUOROURACIL",  "PAT-009", "Poor"],
+                ["", "SIMVASTATIN",   "PAT-010", "Intermediate"],
+                ["", "TRAMADOL",      "PAT-011", "Ultrarapid"],
             ],
             inputs=[vcf_text, drug, patient_id, metabolizer_hint],
-            outputs=[result_html, output_json],
-            fn=_run_text_example,
+            outputs=[result_html, output_json, download_file],
+            fn=_example_run,
             cache_examples=False,
-            label="⚡ Quick Demo Examples — click any row to run instantly",
+            label="⚡ Quick Demo Examples — click any row",
         )
 
         gr.HTML(
-            "<p style='text-align:center;font-size:11px;color:#9aa0a6;margin-top:20px'>"
-            "PharmaGuard AI · CPIC-aligned pharmacogenomics · Meta × Scaler Hackathon 2024"
+            "<p style='text-align:center;font-size:11px;color:#9aa0a6;margin-top:18px'>"
+            "PharmaGuard AI · CPIC-aligned pharmacogenomics · RIFT 2026 HealthTech Hackathon"
             "</p>"
         )
 
@@ -992,5 +1115,4 @@ def build_app() -> gr.Blocks:
 
 
 if __name__ == "__main__":
-    app = build_app()
-    app.launch(server_name="0.0.0.0", server_port=7860, share=True, show_api=False)
+    build_app().launch(server_name="0.0.0.0", server_port=7860, share=True, show_api=False)
