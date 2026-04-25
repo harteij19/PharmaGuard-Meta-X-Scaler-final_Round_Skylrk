@@ -500,14 +500,27 @@ def infer_phenotype(gene: str, diplotype: str) -> Tuple[str, str, float]:
     mapping = PHENOTYPE_MAP.get(gene, {})
     if diplotype in mapping:
         return mapping[diplotype]
-    # Heuristics for unseen diplotypes
     stars = diplotype.split("/")
-    if any(s in ("*17",) for s in stars):
-        return "Ultrarapid Metabolizer", "Ultrarapid", 0.86
-    if any(s in ("A",) for s in stars) and gene == "VKORC1":
+
+    # ── Gene duplication (*NxN notation) → Ultrarapid for CYP2D6 ────────────
+    # VCF files name alleles like *2xN, *1xN meaning gene copy number > 1
+    if gene == "CYP2D6" and any(
+        ("xn" in s.lower() or ("x" in s and s.split("x")[-1].isdigit()))
+        for s in stars
+    ):
+        return "Ultrarapid Metabolizer", "Ultrarapid", 0.93
+
+    # ── *17 allele in any position → Ultrarapid ──────────────────────────────
+    if any("17" in s for s in stars) and gene == "CYP2D6":
+        return "Ultrarapid Metabolizer", "Ultrarapid", 0.88
+
+    # ── VKORC1 A-allele → Warfarin sensitivity ───────────────────────────────
+    if any(s == "A" for s in stars) and gene == "VKORC1":
         if stars.count("A") == 2:
             return "Warfarin-Sensitive", "Sensitive", 0.90
         return "Warfarin-Intermediate", "Intermediate", 0.85
+
+    # ── Fallback: use *1/*1 normal as baseline, subtract confidence ──────────
     ref = mapping.get("*1/*1") or mapping.get("G/G")
     if ref:
         n, a, c = ref
@@ -597,14 +610,19 @@ def run_analysis_core(
         else ("Unknown Phenotype", "Normal", 0.75)
     )
 
-    # ── Override / filename hint ──────────────────────────────────────────────
+    # ── Override / filename hint ─────────────────────────────────────────────
+    # Priority: explicit UI override > filename/content hint > VCF diplotype
     if metabolizer_override and metabolizer_override != "Auto-detect from VCF":
+        # User explicitly selected a phenotype in the UI
         activity = metabolizer_override
         pheno_conf = min(pheno_conf + 0.05, 0.99)
-    elif not vcf_ok:
+    else:
+        # ALWAYS check filename + VCF header for hint keywords
+        # (works both with and without an uploaded VCF file)
         hint = _detect_hint(filename, vcf_content or "")
         if hint:
             activity = hint
+            pheno_conf = min(pheno_conf + 0.05, 0.99)
 
     # VKORC1 secondary gene (Warfarin special-case)
     if drug == "WARFARIN" and vcf_ok:
@@ -950,12 +968,39 @@ body, .gradio-container {
 label { font-weight: 600 !important; color: #1a237e !important; font-size: 13px !important; }
 .section-lbl {
     font-size: 11px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: .07em; color: #0057b8; margin-bottom: 4px;
+    letter-spacing: .07em; color: #ffffff; margin-bottom: 4px;
+    background: #0057b8; padding: 4px 10px; border-radius: 5px;
+    display: inline-block;
 }
 .disclaimer {
     background: #fff8e1; border: 1px solid #ffe082;
     border-radius: 10px; padding: 10px 16px;
     font-size: 12px; color: #795548; text-align: center;
+}
+/* Examples table: make headers and labels visible on any background */
+.gr-samples-table th, table.gr-samples-table th {
+    background: #0057b8 !important;
+    color: #ffffff !important;
+    font-weight: 700 !important;
+    font-size: 12px !important;
+    padding: 8px 12px !important;
+}
+.gr-samples-table td, table.gr-samples-table td {
+    color: #e8f0fe !important;
+    font-size: 13px !important;
+    padding: 7px 12px !important;
+}
+/* Gradio 4 examples wrapper label */
+.label-wrap > span, .block > label > span {
+    color: #ffffff !important;
+    font-weight: 600 !important;
+}
+/* Fix examples panel title visibility */
+.examples-holder .label-wrap span {
+    color: #0057b8 !important;
+    background: #e8f0fe !important;
+    padding: 2px 8px !important;
+    border-radius: 4px !important;
 }
 """
 
