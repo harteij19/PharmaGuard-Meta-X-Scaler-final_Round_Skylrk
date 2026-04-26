@@ -12,7 +12,7 @@ pinned: false
 
 # 🚀 PharmaGuard: Pharmacogenomic Risk Prediction System
 
-### 🧠 Meta x Scaler OpenEnv Hackathon Submission (RIFT 2026)
+### 🧠 Meta x Scaler OpenEnv Hackathon Submission (RIFT 2026) - Theme 5 
 
 PharmaGuard is an AI-powered system that analyzes patient genomic data (VCF files) to predict drug safety risks and provide personalized clinical recommendations using pharmacogenomics.
 
