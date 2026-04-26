@@ -32,7 +32,7 @@ PharmaGuard is an AI-powered system that analyzes patient genomic data (VCF file
 
 ## 🎥 Demo Video
 
-🔗 *(To be added after upload)*
+🔗 https://youtu.be/9-2n7ZQkVm0
 
 ---
 
