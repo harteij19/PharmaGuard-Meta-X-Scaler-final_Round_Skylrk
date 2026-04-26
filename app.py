@@ -1,5 +1,5 @@
-"""
-PharmaGuard AI — RIFT 2026 HealthTech Hackathon
+﻿"""
+PharmaGuard AI — Meta X Scaler Hackathon
 Pharmacogenomic Risk Prediction System
 """
 from __future__ import annotations
@@ -588,7 +588,7 @@ def run_analysis_core(
     metabolizer_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Returns a dict that EXACTLY matches the RIFT 2026 required JSON schema.
+    Returns a dict that EXACTLY matches the Meta X Scaler required JSON schema.
     """
     drug = drug.upper().strip()
     if drug not in DRUG_GENE_MAP:
@@ -778,7 +778,7 @@ def render_card(result: Dict[str, Any]) -> str:
     <div style="flex:1">
       <div style="font-size:15px;font-weight:700;color:#fff">PharmaGuard AI — Risk Assessment Report</div>
       <div style="font-size:11px;color:rgba(255,255,255,.7);margin-top:2px">
-        Precision Drug Safety · CPIC-aligned · RIFT 2026 HealthTech
+        Precision Drug Safety · CPIC-aligned · Meta X Scaler Hackathon
       </div>
     </div>
     {vcf_tag}
@@ -1013,7 +1013,7 @@ HEADER = """
     <div>
       <div style="font-size:22px;font-weight:800;color:#fff;letter-spacing:-.02em">PharmaGuard AI</div>
       <div style="font-size:12px;color:rgba(255,255,255,.75);margin-top:3px">
-        Precision Drug Safety powered by Pharmacogenomics · RIFT 2026 HealthTech Hackathon
+        Precision Drug Safety powered by Pharmacogenomics · Meta X Scaler Hackathon
       </div>
     </div>
     <div style="margin-left:auto;display:flex;gap:6px;flex-direction:column;align-items:flex-end">
@@ -1054,7 +1054,7 @@ METABOLIZER_OPTS = [
 
 def build_app() -> gr.Blocks:
     with gr.Blocks(
-        title="PharmaGuard AI — RIFT 2026",
+        title="PharmaGuard AI — Meta X Scaler Hackathon",
         css=CSS,
         theme=gr.themes.Default(
             primary_hue="blue",
@@ -1116,7 +1116,7 @@ def build_app() -> gr.Blocks:
                 gr.HTML('<p class="section-lbl">📊 Risk Assessment Result</p>')
                 result_html = gr.HTML(value=EMPTY)
 
-                gr.HTML('<p class="section-lbl" style="margin-top:16px">🗂️ Structured JSON (RIFT Schema)</p>')
+                gr.HTML('<p class="section-lbl" style="margin-top:16px">🗂️ Structured JSON (Meta X Scaler Schema)</p>')
                 output_json = gr.Textbox(
                     label="",
                     lines=16,
@@ -1161,7 +1161,7 @@ def build_app() -> gr.Blocks:
 
         gr.HTML(
             "<p style='text-align:center;font-size:11px;color:#9aa0a6;margin-top:18px'>"
-            "PharmaGuard AI · CPIC-aligned pharmacogenomics · RIFT 2026 HealthTech Hackathon"
+            "PharmaGuard AI · CPIC-aligned pharmacogenomics · Meta X Scaler Hackathon"
             "</p>"
         )
 
@@ -1170,3 +1170,4 @@ def build_app() -> gr.Blocks:
 
 if __name__ == "__main__":
     build_app().launch(server_name="0.0.0.0", server_port=7860, share=True, show_api=False)
+
