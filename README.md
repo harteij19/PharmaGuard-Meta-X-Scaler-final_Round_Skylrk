@@ -134,7 +134,7 @@ The system generates structured JSON including:
 * ✅ Live Hugging Face App
 * ✅ GitHub Repository
 * ✅ Colab Notebook
-* ⬜ Demo Video (Pending)
+* ✅ Demo Video (Pending)
 
 ---
 
